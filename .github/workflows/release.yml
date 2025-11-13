@@ -5,6 +5,9 @@ on:
     tags:
       - 'v*'  # 当推送 v* 标签时触发（例如 v1.0.0）
 
+permissions:
+  contents: write
+
 jobs:
   build:
     runs-on: windows-latest
@@ -50,15 +53,10 @@ jobs:
           ## 喜茶杯贴上传工具 ${{ steps.get_version.outputs.VERSION }}
           
           ### 功能特性
-          - ✅ 短信验证码登录（支持腾讯验证码）
+          - ✅ 短信验证码登录
           - ✅ Token直接登录
-          - ✅ 验证码发送冷却（120秒）
-          - ✅ 记住登录信息
-          - ✅ 退出登录功能
           - ✅ 图片选择与预览
-          - ✅ 图片尺寸验证（596x832）
-          - ✅ 仅支持PNG格式
-          - ✅ 图片上传到喜茶服务器
+          - ✅ 直接上传图片到喜茶服务器
           
           ### 使用说明
           1. 下载 `喜茶杯贴上传工具-${{ steps.get_version.outputs.VERSION }}.exe`
@@ -68,11 +66,9 @@ jobs:
           5. 上传到喜茶服务器
           
           ### 系统要求
-          - Windows 10/11
+          - Windows 10/11（其他平台请从源码运行）
           - 网络连接
           
-          ---
-          **完整源代码**: [GitHub Repository](https://github.com/${{ github.repository }})
         draft: false
         prerelease: false
       env:
