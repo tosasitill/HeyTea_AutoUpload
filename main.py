@@ -851,9 +851,6 @@ def main():
             sys.exit(1)
         return
     
-    # 正常运行主程序
-    root = tk.Tk()
-    
     # 启用高DPI支持（必须在创建窗口之前调用）
     scale_factor = 1.0
     
@@ -881,6 +878,9 @@ def main():
             windll.user32.SetProcessDPIAware()
         except:
             pass
+
+    # 正常运行主程序
+    root = tk.Tk()
 
     # 根据缩放比例调整窗口大小
     base_width = 600
