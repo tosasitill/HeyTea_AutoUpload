@@ -10,6 +10,31 @@ import requests
 import json
 import os
 import sys
+import subprocess
+
+# 版本号：从环境变量读取（打包时注入），否则显示git commit hash
+def get_version():
+    # 优先使用环境变量（打包时注入）
+    version = os.environ.get('APP_VERSION')
+    if version:
+        return version
+    
+    # 开发环境：尝试获取git commit hash
+    try:
+        result = subprocess.run(
+            ['git', 'rev-parse', '--short', 'HEAD'],
+            capture_output=True,
+            text=True,
+            timeout=2
+        )
+        if result.returncode == 0:
+            return f"dev-{result.stdout.strip()}"
+    except:
+        pass
+    
+    return "dev"
+
+VERSION = get_version()
 
 
 def run_captcha_window(captcha_app_id):
@@ -394,7 +419,7 @@ class HeyTeaUploader:
         title_label.pack(pady=(20, 10))
         
         # 版本信息
-        version_label = ttk.Label(main_frame, text="Version 1.0.0", font=("", 10))
+        version_label = ttk.Label(main_frame, text=f"Version {VERSION}", font=("", 10))
         version_label.pack(pady=(0, 20))
         
         # 描述
