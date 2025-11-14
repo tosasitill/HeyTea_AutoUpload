@@ -227,9 +227,18 @@ def show_captcha(captcha_app_id, on_success, on_close=None):
     """显示验证码窗口"""
     import subprocess
     
+    # 获取当前执行文件路径（适配打包后的情况）
+    if getattr(sys, 'frozen', False):
+        # 如果是打包后的可执行文件
+        current_executable = sys.executable
+        cmd = [current_executable, '--captcha', captcha_app_id]
+    else:
+        # 如果是开发环境的Python脚本
+        cmd = [sys.executable, __file__, '--captcha', captcha_app_id]
+    
     # 启动当前程序的子进程，传入特殊参数
     process = subprocess.Popen(
-        [sys.executable, __file__, '--captcha', captcha_app_id],
+        cmd,
         stdout=subprocess.PIPE,
         stderr=subprocess.PIPE,
         text=True,
