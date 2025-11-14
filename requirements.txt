@@ -1,5 +1,6 @@
 # 图像处理
 Pillow>=10.0.0
+numpy>=1.21.0
 
 # HTTP请求
 requests>=2.31.0

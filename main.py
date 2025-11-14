@@ -11,6 +11,8 @@ import json
 import os
 import sys
 import subprocess
+import numpy as np
+from cup_image_processor import process_image, generate_print_preview
 
 # 版本号：从环境变量读取（打包时注入），否则显示git commit hash
 def get_version():
@@ -280,7 +282,8 @@ class HeyTeaUploader:
         self.root = root
         self.root.title("喜茶自定义杯贴上传工具")
         # geometry 已经在 main() 中根据 DPI 设置
-        self.root.resizable(False, False)
+        self.root.resizable(True, True)  # 允许用户拖动缩放窗口
+        self.root.minsize(800, 600)  # 设置最小窗口尺寸
         
         self.token = None
         self.selected_image_path = None
@@ -298,6 +301,12 @@ class HeyTeaUploader:
 
         self.scale_factor = scale_factor
         
+        # 杯贴相关变量
+        self.cup_current_file = None
+        self.cup_current_image = None
+        self.cup_render_timer = None
+        self.cup_canvas_images = {}  # 缓存PhotoImage对象
+        
         self.create_widgets()
         self.load_config()  # 加载保存的配置
     
@@ -314,12 +323,17 @@ class HeyTeaUploader:
         self.upload_frame = ttk.Frame(self.notebook)
         self.notebook.add(self.upload_frame, text="上传图片")
         
+        # 杯贴小助手Tab
+        self.cup_sticker_frame = ttk.Frame(self.notebook)
+        self.notebook.add(self.cup_sticker_frame, text="杯贴小助手")
+        
         # 关于Tab
         self.about_frame = ttk.Frame(self.notebook)
         self.notebook.add(self.about_frame, text="关于")
         
         self.create_login_tab()
         self.create_upload_tab()
+        self.create_cup_sticker_tab()
         self.create_about_tab()
     
     def create_login_tab(self):
@@ -468,6 +482,367 @@ class HeyTeaUploader:
         author_label = ttk.Label(main_frame, text="© 2025 FuQuan233", font=("", 9), foreground="gray")
         author_label.pack(pady=(20, 0))
     
+    def create_cup_sticker_tab(self):
+        """创建杯贴小助手Tab"""
+        # 创建主容器
+        main_container = ttk.Frame(self.cup_sticker_frame)
+        main_container.pack(fill='both', expand=True, padx=10, pady=10)
+        
+        # 创建标题
+        title_label = ttk.Label(main_container, text="喜茶杯贴小助手", font=("", 14, "bold"))
+        title_label.pack(pady=(0, 10))
+        
+        # 创建两列布局框架
+        content_frame = ttk.Frame(main_container)
+        content_frame.pack(fill='both', expand=True)
+        
+        # 左侧：控制面板
+        left_frame = ttk.Frame(content_frame)
+        left_frame.pack(side='left', fill='both', expand=True, padx=(0, 5))
+        
+        # 右侧：预览面板
+        right_frame = ttk.Frame(content_frame)
+        right_frame.pack(side='right', fill='both', expand=True, padx=(5, 0))
+        
+        # ===== 左侧控制面板 =====
+        # 文件上传区域
+        drop_frame = ttk.LabelFrame(left_frame, text="选择图片", padding="10")
+        drop_frame.pack(fill='x', pady=(0, 10))
+        
+        self.cup_file_label = ttk.Label(drop_frame, text="点击选择文件或拖放", 
+                                        background="#f0f0f0", foreground="#999", justify='center')
+        self.cup_file_label.pack(fill='both', expand=True, ipady=30)
+        self.cup_file_label.bind('<Button-1>', lambda e: self.cup_select_image())
+        
+        # 参数控制面板
+        params_frame = ttk.LabelFrame(left_frame, text="处理参数", padding="10")
+        params_frame.pack(fill='both', expand=True, pady=(0, 10))
+        
+        # 创建内部滚动框架以支持macOS滚动
+        canvas = tk.Canvas(params_frame, bg='white', highlightthickness=0)
+        scrollbar = ttk.Scrollbar(params_frame, orient='vertical', command=canvas.yview)
+        scroll_frame = ttk.Frame(canvas)
+        
+        scroll_frame.bind(
+            "<Configure>",
+            lambda e: canvas.configure(scrollregion=canvas.bbox("all"))
+        )
+        
+        # 创建窗口时设置宽度以消除左侧空白
+        canvas_window = canvas.create_window((0, 0), window=scroll_frame, anchor="nw")
+        canvas.configure(yscrollcommand=scrollbar.set)
+        
+        # 当canvas大小改变时更新window宽度
+        def on_canvas_configure(event):
+            canvas.itemconfig(canvas_window, width=event.width)
+        
+        canvas.bind("<Configure>", on_canvas_configure)
+        
+        # 支持鼠标滚轮（macOS）
+        def _on_mousewheel(event):
+            canvas.yview_scroll(int(-1*(event.delta/120)), "units")
+        
+        canvas.bind_all("<MouseWheel>", _on_mousewheel)
+        canvas.bind_all("<Button-4>", lambda e: canvas.yview_scroll(-1, "units"))
+        canvas.bind_all("<Button-5>", lambda e: canvas.yview_scroll(1, "units"))
+        
+        scrollbar.pack(side='right', fill='y')
+        canvas.pack(side='left', fill='both', expand=True)
+        
+        # 在scroll_frame中添加参数控制
+        # 模式选择
+        mode_frame = ttk.Frame(scroll_frame)
+        mode_frame.pack(fill='x', pady=2, padx=0)
+        ttk.Label(mode_frame, text="处理模式:").pack(side='left')
+        self.cup_mode_var = tk.StringVar(value="circle")
+        mode_combo = ttk.Combobox(mode_frame, textvariable=self.cup_mode_var, 
+                                   values=["circle", "bayer", "fs"], state='readonly', width=15)
+        mode_combo.pack(side='right', fill='x', expand=True)
+        mode_combo.bind('<<ComboboxSelected>>', lambda e: self.cup_schedule_render())
+        
+        # 图像缩放
+        scale_frame = ttk.Frame(scroll_frame)
+        scale_frame.pack(fill='x', pady=2, padx=0)
+        ttk.Label(scale_frame, text="图像缩放 (%):").pack(side='left')
+        self.cup_scale_var = tk.IntVar(value=100)
+        self.cup_scale_label = ttk.Label(scale_frame, text="100")
+        self.cup_scale_label.pack(side='right', padx=(5, 0))
+        scale_slider = ttk.Scale(scale_frame, from_=25, to=300, orient='horizontal',
+                                 variable=self.cup_scale_var, command=lambda v: self.cup_update_scale_label())
+        scale_slider.pack(side='right', fill='x', expand=True, padx=(0, 5))
+        scale_slider.bind('<B1-Motion>', lambda e: self.cup_schedule_render())
+        scale_slider.bind('<ButtonRelease-1>', lambda e: self.cup_schedule_render())
+        
+        # 网格参数（仅圆形模式）
+        grid_frame = ttk.Frame(scroll_frame)
+        grid_frame.pack(fill='x', pady=2, padx=0)
+        ttk.Label(grid_frame, text="网格大小 (px):").pack(side='left')
+        self.cup_grid_var = tk.IntVar(value=4)
+        self.cup_grid_label = ttk.Label(grid_frame, text="4")
+        self.cup_grid_label.pack(side='right', padx=(5, 0))
+        grid_slider = ttk.Scale(grid_frame, from_=2, to=16, orient='horizontal',
+                               variable=self.cup_grid_var, command=lambda v: self.cup_update_grid_label())
+        grid_slider.pack(side='right', fill='x', expand=True, padx=(0, 5))
+        grid_slider.bind('<B1-Motion>', lambda e: self.cup_schedule_render())
+        grid_slider.bind('<ButtonRelease-1>', lambda e: self.cup_schedule_render())
+        
+        # 图案形状
+        shape_frame = ttk.Frame(scroll_frame)
+        shape_frame.pack(fill='x', pady=2, padx=0)
+        ttk.Label(shape_frame, text="图案形状:").pack(side='left')
+        self.cup_shape_var = tk.StringVar(value="circle")
+        shape_combo = ttk.Combobox(shape_frame, textvariable=self.cup_shape_var,
+                                  values=["circle", "square", "cross"], state='readonly', width=15)
+        shape_combo.pack(side='right', fill='x', expand=True)
+        shape_combo.bind('<<ComboboxSelected>>', lambda e: self.cup_schedule_render())
+        
+        # 网格角度
+        angle_frame = ttk.Frame(scroll_frame)
+        angle_frame.pack(fill='x', pady=2, padx=0)
+        ttk.Label(angle_frame, text="网格角度 (°):").pack(side='left')
+        self.cup_angle_var = tk.IntVar(value=45)
+        self.cup_angle_label = ttk.Label(angle_frame, text="45")
+        self.cup_angle_label.pack(side='right', padx=(5, 0))
+        angle_slider = ttk.Scale(angle_frame, from_=0, to=90, orient='horizontal',
+                                variable=self.cup_angle_var, command=lambda v: self.cup_update_angle_label())
+        angle_slider.pack(side='right', fill='x', expand=True, padx=(0, 5))
+        angle_slider.bind('<B1-Motion>', lambda e: self.cup_schedule_render())
+        angle_slider.bind('<ButtonRelease-1>', lambda e: self.cup_schedule_render())
+        
+        # Gamma 调整
+        gamma_frame = ttk.Frame(scroll_frame)
+        gamma_frame.pack(fill='x', pady=2, padx=0)
+        ttk.Label(gamma_frame, text="Gamma:").pack(side='left')
+        self.cup_gamma_var = tk.DoubleVar(value=1.0)
+        self.cup_gamma_label = ttk.Label(gamma_frame, text="1.00")
+        self.cup_gamma_label.pack(side='right', padx=(5, 0))
+        gamma_slider = ttk.Scale(gamma_frame, from_=0.2, to=3.0, orient='horizontal',
+                                variable=self.cup_gamma_var, command=lambda v: self.cup_update_gamma_label())
+        gamma_slider.pack(side='right', fill='x', expand=True, padx=(0, 5))
+        gamma_slider.bind('<B1-Motion>', lambda e: self.cup_schedule_render())
+        gamma_slider.bind('<ButtonRelease-1>', lambda e: self.cup_schedule_render())
+        
+        # 对比度
+        contrast_frame = ttk.Frame(scroll_frame)
+        contrast_frame.pack(fill='x', pady=2, padx=0)
+        ttk.Label(contrast_frame, text="对比度:").pack(side='left')
+        self.cup_contrast_var = tk.IntVar(value=0)
+        self.cup_contrast_label = ttk.Label(contrast_frame, text="0")
+        self.cup_contrast_label.pack(side='right', padx=(5, 0))
+        contrast_slider = ttk.Scale(contrast_frame, from_=-100, to=100, orient='horizontal',
+                                   variable=self.cup_contrast_var, command=lambda v: self.cup_update_contrast_label())
+        contrast_slider.pack(side='right', fill='x', expand=True, padx=(0, 5))
+        contrast_slider.bind('<B1-Motion>', lambda e: self.cup_schedule_render())
+        contrast_slider.bind('<ButtonRelease-1>', lambda e: self.cup_schedule_render())
+        
+        # 边缘保护
+        edge_frame = ttk.Frame(scroll_frame)
+        edge_frame.pack(fill='x', pady=2, padx=0)
+        self.cup_edge_var = tk.BooleanVar(value=False)
+        ttk.Checkbutton(edge_frame, text="边缘保护", variable=self.cup_edge_var,
+                       command=self.cup_schedule_render).pack(side='left')
+        
+        # 边缘参数
+        lo_frame = ttk.Frame(scroll_frame)
+        lo_frame.pack(fill='x', pady=2, padx=0)
+        ttk.Label(lo_frame, text="更黑阈值:").pack(side='left')
+        self.cup_lo_var = tk.IntVar(value=40)
+        self.cup_lo_label = ttk.Label(lo_frame, text="40")
+        self.cup_lo_label.pack(side='right', padx=(5, 0))
+        lo_slider = ttk.Scale(lo_frame, from_=0, to=255, orient='horizontal',
+                             variable=self.cup_lo_var, command=lambda v: self.cup_update_lo_label())
+        lo_slider.pack(side='right', fill='x', expand=True, padx=(0, 5))
+        lo_slider.bind('<B1-Motion>', lambda e: self.cup_schedule_render())
+        lo_slider.bind('<ButtonRelease-1>', lambda e: self.cup_schedule_render())
+        
+        # ===== 右侧预览面板 =====
+        preview_frame = ttk.LabelFrame(right_frame, text="预览", padding="5")
+        preview_frame.pack(fill='both', expand=False)
+        
+        # 创建两列预览布局（平行展示）
+        preview_content = ttk.Frame(preview_frame)
+        preview_content.pack()
+        
+        # 左侧：主图像预览（596×832 -> 缩放到 300×400）
+        main_preview_frame = ttk.LabelFrame(preview_content, text="处理结果", padding="2")
+        main_preview_frame.pack(side='left', padx=(0, 10))
+        
+        self.cup_preview_canvas = tk.Canvas(main_preview_frame, bg='white',
+                                            relief='sunken', bd=1, width=300, height=400)
+        self.cup_preview_canvas.pack()
+        self.cup_preview_label = tk.PhotoImage()
+        self.cup_canvas_item = self.cup_preview_canvas.create_image(0, 0, image=self.cup_preview_label, anchor='nw')
+        
+        # 右侧：最终打印效果预览（360×760 -> 缩放到 180×380）
+        print_preview_frame = ttk.LabelFrame(preview_content, text="标签效果", padding="2")
+        print_preview_frame.pack(side='left')
+        
+        self.cup_print_canvas = tk.Canvas(print_preview_frame, bg='#eaeaea',
+                                         relief='sunken', bd=1, width=180, height=380)
+        self.cup_print_canvas.pack()
+        self.cup_print_label = tk.PhotoImage()
+        self.cup_print_item = self.cup_print_canvas.create_image(0, 0, image=self.cup_print_label, anchor='nw')
+        
+        # ===== 按钮区域 =====
+        button_frame = ttk.Frame(main_container)
+        button_frame.pack(fill='x', pady=(10, 0))
+        
+        self.cup_export_btn = ttk.Button(button_frame, text="导出成品 PNG", 
+                                        command=self.cup_export_image, state='disabled')
+        self.cup_export_btn.pack(side='right', padx=(5, 0))
+        
+        self.cup_clear_btn = ttk.Button(button_frame, text="清空", command=self.cup_clear)
+        self.cup_clear_btn.pack(side='right')
+    
+    def cup_select_image(self):
+        """选择杯贴图片"""
+        file_path = filedialog.askopenfilename(
+            title="选择图片",
+            filetypes=[("图片文件", "*.jpg *.jpeg *.png *.gif *.bmp"), ("所有文件", "*.*")]
+        )
+        
+        if file_path:
+            try:
+                self.cup_current_file = file_path
+                self.cup_current_image = Image.open(file_path)
+                self.cup_file_label.config(text=f"已选择: {os.path.basename(file_path)}", foreground="#000")
+                self.cup_export_btn.config(state='normal')
+                self.cup_schedule_render()
+            except Exception as e:
+                messagebox.showerror("错误", f"无法打开图片: {e}")
+    
+    def cup_update_scale_label(self):
+        """更新缩放标签"""
+        self.cup_scale_label.config(text=str(self.cup_scale_var.get()))
+    
+    def cup_update_grid_label(self):
+        """更新网格标签"""
+        self.cup_grid_label.config(text=str(self.cup_grid_var.get()))
+    
+    def cup_update_angle_label(self):
+        """更新角度标签"""
+        self.cup_angle_label.config(text=str(self.cup_angle_var.get()))
+    
+    def cup_update_gamma_label(self):
+        """更新Gamma标签"""
+        self.cup_gamma_label.config(text=f"{self.cup_gamma_var.get():.2f}")
+    
+    def cup_update_contrast_label(self):
+        """更新对比度标签"""
+        self.cup_contrast_label.config(text=str(self.cup_contrast_var.get()))
+    
+    def cup_update_lo_label(self):
+        """更新Lo阈值标签"""
+        self.cup_lo_label.config(text=str(self.cup_lo_var.get()))
+    
+    def cup_schedule_render(self):
+        """计划渲染（防止频繁重新绘制）"""
+        if not self.cup_current_image:
+            return
+        
+        if self.cup_render_timer:
+            self.root.after_cancel(self.cup_render_timer)
+        
+        self.cup_render_timer = self.root.after(300, self.cup_render)
+    
+    def cup_render(self):
+        """渲染图像预览"""
+        if not self.cup_current_image:
+            return
+        
+        try:
+            # 处理图像
+            binary_array, orig_w, orig_h, real_scale = process_image(
+                self.cup_current_image,
+                mode=self.cup_mode_var.get(),
+                canvas_width=596,
+                canvas_height=832,
+                scale_percent=self.cup_scale_var.get(),
+                grid_size=self.cup_grid_var.get(),
+                shape=self.cup_shape_var.get(),
+                angle=self.cup_angle_var.get(),
+                gamma=self.cup_gamma_var.get(),
+                contrast=self.cup_contrast_var.get(),
+                edge_protect=self.cup_edge_var.get(),
+                lo_threshold=self.cup_lo_var.get(),
+                hi_threshold=120,
+                tau_threshold=60,
+                dilate_iters=0,
+                fs_serpentine=True
+            )
+            
+            # 转换为PIL图像用于显示
+            binary_img = Image.fromarray(binary_array, 'L')
+            
+            # 主预览框：缩放到300x400（对应Canvas宽高）
+            # 保持596:832的比例 -> 300:400
+            binary_img_display = binary_img.resize((300, 400), Image.Resampling.LANCZOS)
+            
+            # 转为PhotoImage
+            photo = ImageTk.PhotoImage(binary_img_display)
+            self.cup_canvas_images['main'] = photo
+            self.cup_preview_canvas.itemconfig(self.cup_canvas_item, image=photo)
+            
+            # 生成打印预览（最终效果 - 360x760的标签模拟）
+            print_preview = generate_print_preview(binary_array)
+            
+            # 打印预览框：缩放到180x380（对应Canvas宽高）
+            # 保持360:760的比例 -> 180:380
+            print_preview_display = print_preview.resize((180, 380), Image.Resampling.LANCZOS)
+            
+            # 转为PhotoImage
+            print_photo = ImageTk.PhotoImage(print_preview_display)
+            self.cup_canvas_images['print'] = print_photo
+            self.cup_print_canvas.itemconfig(self.cup_print_item, image=print_photo)
+            
+            # 存储处理后的二值化图像供导出使用
+            self.cup_processed_binary = binary_img
+            
+        except Exception as e:
+            messagebox.showerror("错误", f"处理图像失败: {e}")
+            import traceback
+            traceback.print_exc()
+    
+    def cup_export_image(self):
+        """导出成品PNG - 导出最后修改的处理结果"""
+        if not hasattr(self, 'cup_processed_binary') or self.cup_processed_binary is None:
+            messagebox.showwarning("提示", "请先处理图像")
+            return
+        
+        if not self.cup_current_file:
+            messagebox.showwarning("提示", "没有选择源文件")
+            return
+        
+        # 生成默认文件名
+        source_filename = os.path.splitext(os.path.basename(self.cup_current_file))[0]
+        default_filename = f"{source_filename}_596x832_bw.png"
+        
+        file_path = filedialog.asksaveasfilename(
+            title="导出处理后的图片",
+            defaultextension=".png",
+            filetypes=[("PNG文件", "*.png"), ("所有文件", "*.*")],
+            initialfile=default_filename
+        )
+        
+        if file_path:
+            try:
+                # 导出当前处理后的二值化图像
+                self.cup_processed_binary.save(file_path, 'PNG')
+                messagebox.showinfo("导出成功", f"图片已保存到:\n{file_path}\n\n图片尺寸: 596×832 像素")
+            except Exception as e:
+                messagebox.showerror("导出失败", f"保存失败: {e}")
+    
+    def cup_clear(self):
+        """清空杯贴数据"""
+        self.cup_current_file = None
+        self.cup_current_image = None
+        self.cup_file_label.config(text="点击选择文件或拖放", foreground="#999")
+        self.cup_preview_canvas.delete('all')
+        self.cup_print_canvas.delete('all')
+        self.cup_export_btn.config(state='disabled')
+        if hasattr(self, 'cup_processed_binary'):
+            self.cup_processed_binary = None
+
     def get_verification_code(self):
         """获取验证码"""
         # 检查是否在冷却期
@@ -917,16 +1292,17 @@ def main():
     root = tk.Tk()
 
     # 根据缩放比例调整窗口大小
-    base_width = 600
-    base_height = 530
+    base_width = 1400
+    base_height = 1100
     
     # 对于 macOS，调整基础尺寸
     if system == "Darwin":
-        base_height = 600  # macOS 需要更大的高度
+        base_height = 1150  # macOS 需要更大的高度
     
     scaled_width = int(base_width * scale_factor)
     scaled_height = int(base_height * scale_factor)
     root.geometry(f"{scaled_width}x{scaled_height}")
+    root.minsize(800, 600)  # 设置最小窗口尺寸
     
     app = HeyTeaUploader(root, scale_factor)
     root.mainloop()
