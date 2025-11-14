@@ -217,3 +217,4 @@ __marimo__/
 
 # HeyTea configuration file
 heytea_config.json
+.DS_Store
